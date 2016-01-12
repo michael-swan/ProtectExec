@@ -11,10 +11,10 @@
 and performs the following steps:
 
  1. Link a loopback device to the SquashFS file
- 2. Mount that loopback device at /, tmpfs at /db, and all automatic `/etc/fstab` entries (relative to root path)
+ 2. Mount that loopback device at /, tmpfs at /db, and all automatic `/etc/fstab` entries (relative to new root path)
  3. Call `clone(2)` with `CLONE_NEWNS`, `CLONE_NEWNET`, `CLONE_NEWIPC`, and `CLONE_NEWUTS` options set
  4. Join the specified cgroup
- 5. `chroot(2)`'s into that new root
+ 5. `pivot_root(2)`'s into the new root
  6. Change the namespaces to their desired configuration (e.g. unmount everything not from step 2, remove all interfaces)
  7. Perform `setuid(2)` with the specified UID
  8. `execve(2)` the specified program
