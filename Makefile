@@ -26,17 +26,21 @@ clean:
 static: $(BUILD_DEST) $(STATIC_TARGET)
 shared: $(BUILD_DEST) $(SHARED_TARGET)
 
-tests: CFLAGS=-g -O0 -Wall -Wextra -Iinc $(OPTFLAGS)
+tests: CFLAGS=-g -O0 -Wall -Wextra -Iinc -DNDEBUG $(OPTFLAGS)
 tests: $(TESTS)
 
-test/test_%: test/test_%.c
-	$(CC) -o $@ $(SOURCES) $<
+test/test_%: test/test_%.c $(SOURCES)
+	$(CC) $(CFLAGS) -o $@ $^
+	paxctl -c $@
+	paxctl -m $@
+	paxctl -ps $@
 
 $(STATIC_TARGET): $(OBJECTS)
-	$(CC) -static -o $@ $(OBJECTS)
+	ar rcs $@ $(OBJECTS)
+	ranlib $@
 
 $(SHARED_TARGET): $(OBJECTS)
-	$(CC) -shared -o $@ $(OBJECTS)
+	$(CC) $(CFLAGS) -shared -o $@ $(OBJECTS)
 
 $(BUILD_DEST):
 	mkdir -p $@

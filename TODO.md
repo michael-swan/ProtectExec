@@ -3,3 +3,4 @@
  2. Add `file(1)`-style check of the SquashFS file.
  3. Add check of SquashFS support in kernel-space. Try to modprobe if not found.
  4. Add check that path corresponds with a cgroup file system.
+ 5. Write losetup.c
