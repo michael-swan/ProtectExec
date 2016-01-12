@@ -1,72 +1,32 @@
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <sched.h>
 #include <unistd.h>
 #include <linux/loop.h>
+#include <linux/sched.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <mntent.h>
 
-// #include "config.h"
+#include "config.h"
 #include "protect_exec.h"
 #include "dbg.h"
 
-// Statically allocate stack space for clone
-static char clone_stack[CLONE_STACK_SIZE];
+static int protect_exec_clone(void *data);
+static bool valid_mntent(struct mntent *me);
 
-// Parameters: 
-// Return: -1 on error, file descriptor (>0) on success 
-static int losetup(const char *fs_path) {
-    int status;
-    pid_t child_pid;
-    
-    // Create child stdout pipe
-    int stdout_pipe[2] = { -1, -1 };
-    if(pipe(stdout_pipe) < 0) {
-        // 'pipe' creation failed
-        return -1;
-    }
-    // Start a fork
-    child_pid = fork();
-
-    int ret = -5555;
-    if(child_pid == 0) {
-        // Connect pipe - child side
-        dup2(stdout_pipe[1], 1);
-        // Execute 'losetup' within the child
-        char *const args[] = { "losetup", "-f", fs_path, NULL };
-        char *const envp[] = { NULL };
-        ret = execve("/sbin/losetup", args, envp);
-        exit(0);
-    } else {
-        // Wait for 'losetup' command to complete
-        // waitpid(child_pid, &status, options);
-        pid_t p = wait(&status);
-        while(p != child_pid && p != -1) {
-            p = wait(&status);
-        }
-
-        char buf[4097];
-        int c = read(stdout_pipe[0], buf, 4096);
-        while(c != 0 && c != -1) {
-            buf[c] = 0;
-            printf("PRINTING: %s\n", buf);
-            c = read(stdout_pipe[0], buf, 4096);
-        }
-
-        if(c == -1) {
-            return -1;
-        }
-
-        if(p == child_pid) {
-            return 0;
-        } else {
-            return -1;
-        }
-
-    }
-
-    return -1;
-}
+struct protect_exec_args {
+    uid_t uid;
+    char *fs_path;
+    char *mnt_path;
+    char *cgroup_path;
+    char *exec_path;
+    char **argv;
+    char **envp;
+};
 
 // Assumptions:
 //  1. 'squashfs' and 'loop' modules have been loaded (or are built into the kernel)
@@ -116,9 +76,28 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
         // Mount valid fstab entry
         mount(me->mnt_fsname, me->mnt_dir, me->mnt_type, 0, NULL);
     }
-    
+
+    size_t clone_stack_size = sysconf(_SC_PAGESIZE);
+    void *clone_stack = alloca(clone_stack_size);
+
+    struct protect_exec_args *args = alloca(sizeof(struct protect_exec_args));
+    args->uid = uid;
+    args->fs_path = fs_path;
+    args->mnt_path = mnt_path;
+    args->cgroup_path = cgroup_path;
+    args->exec_path = exec_path;
+    args->argv = argv;
+    args->envp = envp;
+
     // 3. Call `clone(2)`, detaching from certain namespaces
-    clone(protect_exec_clone, clone_stack + CLONE_STACK_SIZE, CLONE_NAMESPACES, NULL);
+    int status;
+    pid_t clone_pid = clone(protect_exec_clone, clone_stack + clone_stack_size,
+                            CLONE_NAMESPACES | CLONE_VFORK | SIGCHLD, args);
+
+    if(clone_pid == -1 || waitpid(clone_pid, &status, 0) == -1 || status != 0)
+    {
+        return -1;
+    }
 
     return 0;
 }
@@ -127,9 +106,11 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
 //   1. Conceive a convention for returning errors from a clone(2) function.
 static int protect_exec_clone(void *data)
 {
+    struct protect_exec_args *args = data;
+
     // 4. Join the specified cgroup
     // 4a. Acquire a file descriptor to the cgroups 'tasks' file
-    int cgroup_dir_fd = open(cgroup_path, O_DIRECTORY|O_RDONLY|O_CLOEXEC);
+    int cgroup_dir_fd = open(args->cgroup_path, O_DIRECTORY|O_RDONLY|O_CLOEXEC);
     if(cgroup_dir_fd == -1)
     {
         return -1;
@@ -161,7 +142,7 @@ static int protect_exec_clone(void *data)
         return -1;
     }
 
-    int new_root_fd = open(mnt_path, O_DIRECTORY|O_RDONLY|O_CLOEXEC);
+    int new_root_fd = open(args->mnt_path, O_DIRECTORY|O_RDONLY|O_CLOEXEC);
     if(new_root_fd == -1)
     {
         return -1;
@@ -194,13 +175,13 @@ static int protect_exec_clone(void *data)
     // TODO: Figure out what to change and how to change it.
     
     // 7. Perform `setuid(2)` with the specified UID
-    if(setuid(uid))
+    if(setuid(args->uid))
     {
         return -1;
     }
 
     // 8. `execve(2)` the specified program
-    execve(exec_path, argv, envp);
+    execve(args->exec_path, args->argv, args->envp);
 
     // NOTE: The following is only reached upon the failure of `execve(2)`
     return -1;

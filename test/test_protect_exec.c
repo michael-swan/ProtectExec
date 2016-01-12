@@ -1,7 +1,16 @@
-#include <stddef.h>
+#include <unistd.h>
+#include "losetup.h"
 
-int main(void) {
-	int x = 5;
-	int y = 6;
-	return protect_exec(1, "/home/mswan/ProtectExec/example", NULL, NULL, NULL, NULL, NULL);
+int main(void)
+{
+    // losetup("/home/mswan/ProtectExec/example");
+    char *argv[] = { NULL };
+    char *envp[] = { NULL };
+    if(protect_exec(1000, "/home/mswan/ProtectExec/example.sqfs",
+                    "/home/mswan/ProtectExec/mnt", "/",
+                    "/program", argv, envp))
+    {
+        return 1;
+    }
+    return 0;
 }

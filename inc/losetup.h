@@ -1,1 +1,1 @@
-int losetup(const char *filename);
+char *losetup(const char *filename);

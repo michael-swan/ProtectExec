@@ -13,7 +13,8 @@
     // cap_t cap = cap_get_proc();
     // bool can_mknod = cap_get_flag(cap, CAP_MKNOD, ... );
 
-static int assign_loopback(const char *filename, int dir_fd, DIR *dir);
+static char *assign_loopback(const char *filename, int dir_fd, DIR *dir);
+static char *fd_path(int fd);
 
 // Description:
 //   Choose an available loopback device within /dev to link to a given file.
