@@ -91,7 +91,7 @@ static char *assign_loopback(const char *filename, int dir_fd, DIR *dir)
         if(ioctl(loop_fd, LOOP_GET_STATUS, &info) == -1)
         {
             char *loop_fd_path = fd_path(loop_fd);
-            debug("Vacant loopback device found. (path: \"%s\")", loop_fd_path);
+            debug("Vacant loopback device found. (filename: \"%s\")", loop_fd_path);
             free(loop_fd_path);
 
             // Open the source file to assign to the open loopback device
