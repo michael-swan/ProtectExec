@@ -146,7 +146,7 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
     args.envp = envp;
 
     // 3c. Call `clone(2)` synchronously
-    int status;
+    int status = 0;
     pid_t clone_pid = clone(protect_exec_clone, clone_stack + clone_stack_size,
                             CLONE_NAMESPACES | CLONE_VFORK | SIGCHLD, &args);
 
@@ -169,7 +169,7 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
 
         if(status != 0)
         {
-            debug("clone(2) and waitpid(2) completed with non-success status code. (status: %d)", status);
+            debug("clone(2) and waitpid(2) completed with non-success status code. (status: %d)", WEXITSTATUS(status));
             goto error_2;
         }
     }
