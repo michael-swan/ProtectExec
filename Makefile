@@ -1,7 +1,7 @@
 OUTPUT_LIB_NAME=pexec
 
-CC=gcc
-CFLAGS=-g -O2 -Wall -Wextra -Iinc -DNDEBUG $(OPTFLAGS)
+CC=clang
+CFLAGS=-std=c99 -g -O2 -Wall -Wextra -Iinc -DNDEBUG $(OPTFLAGS)
 LIBS=$(OPTLIBS)
 PREFIX?=/usr/local
 
@@ -26,7 +26,7 @@ clean:
 static: $(BUILD_DEST) $(STATIC_TARGET)
 shared: $(BUILD_DEST) $(SHARED_TARGET)
 
-tests: CFLAGS=-g -O0 -Wall -Wextra -Iinc -DNDEBUG $(OPTFLAGS)
+tests: CFLAGS=-std=c99 -g -O0 -Wall -Wextra -Iinc -DNDEBUG $(OPTFLAGS)
 tests: $(TESTS)
 
 test/test_%: test/test_%.c $(SOURCES)
