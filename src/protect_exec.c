@@ -9,6 +9,7 @@
 #include <linux/loop.h>
 #include <linux/sched.h>
 #include <sched.h>
+#include <alloca.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <mntent.h>
@@ -40,6 +41,9 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
                  const char *cgroup_path, const char *exec_path,
                  char *const argv[], char *const envp[])
 {
+    int ret = -1;
+    int loop_fd;
+
     // 0. Trivial input validation
     // Diallowed inputs:
     //   1. NULL pointers
@@ -49,7 +53,7 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
     {
         errno = EINVAL;
         debug("Input validation failed. (errno: %s)", clean_errno());
-        return -1;
+        goto error_0;
     }
 
     // 1. Link a loopback device to the SquashFS file
@@ -58,7 +62,7 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
     if(loop_path == NULL)
     {
         debug("Loopback device assignment failed. (errno: %s)", clean_errno());
-        return -1;
+        goto error_0;
     }
 
     // 2. Mount that loopback device at /, tmpfs at /db, and all automatic `/etc/fstab` entries (relative to root path)
@@ -66,7 +70,7 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
     if(mount(loop_path, mnt_path, "squashfs", MS_RDONLY, NULL))
     {
         debug("mount(2) failed. (errno: %s)", clean_errno());
-        return -1;
+        goto error_1;
     }
 
     // 2b. Mount contents of /etc/fstab if it exists
@@ -91,16 +95,22 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
                 continue;
             }
 
-            // TODO: Cleanup me->mnt_dir: remove ".." substrings and concatenate with mnt_path
+            // TODO: Sanitize me->mnt_dir: remove ".." substrings
             // TODO: Add support for mount options (after safely processing me->mnt_opts)
+            // Concatenate me->mnt_dir with mnt_path
+            char mnt_dir[4097];
+            snprintf(mnt_dir, sizeof(mnt_dir), "%s%s", mnt_path, me->mnt_dir);
 
             // Mount valid fstab entry
-            if(mount(me->mnt_fsname, me->mnt_dir, me->mnt_type, 0, NULL))
+            if(mount(me->mnt_fsname, mnt_dir, me->mnt_type, 0, NULL))
             {
                 // '/etc/fstab' mount failure is not considered fatal
                 debug("mount(2) failed while processing '/etc/fstab'. (errno: %s)", clean_errno());
             }
         }
+
+        // Close mount entry file descriptor
+        endmntent(me_file);
     }
 
     // 3. Perform `clone(2)`, detaching from certain namespaces
@@ -123,7 +133,7 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
         debug("clone_stack_size is smaller than a system page.");
     }
 
-    char clone_stack[clone_stack_size];
+    char *clone_stack = alloca(clone_stack_size);
 
     // 3b. Store the arguments to pass to `clone(2)` in a dynamically allocated struct
     struct protect_exec_args args;
@@ -143,7 +153,7 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
     if(clone_pid == -1)
     {
         debug("clone(2) failed. (errno: %s)", clean_errno());
-        return -1;
+        goto error_2;
     }
 
     debug("clone(2) completed.");
@@ -151,18 +161,51 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
     if(waitpid(clone_pid, &status, 0) == -1)
     {
         debug("waitpid(2) failed. (errno: %s)", clean_errno());
-        return -1;
+        goto error_2;
     }
-
-    debug("waitpid(2) completed.");
-
-    if(status != 0)
+    else
     {
-        debug("clone(2) and waitpid(2) completed with non-success status code. (status: %d)", status);
-        return -1;
+        debug("waitpid(2) completed.");
+
+        if(status != 0)
+        {
+            debug("clone(2) and waitpid(2) completed with non-success status code. (status: %d)", status);
+            goto error_2;
+        }
     }
 
-    return 0;
+    ret = 0;
+
+error_2:
+    if(umount2(mnt_path, MNT_DETACH))
+    {
+        debug("umount2(2) failed. (errno: %s)", clean_errno());
+        debug("umount2(\"%s\", MNT_DETACH)", mnt_path);
+    }
+error_1:
+    loop_fd = open(loop_path, O_NONBLOCK);
+
+    if(loop_fd == -1)
+    {
+        debug("open(2) failed. (errno: %s)", clean_errno());
+        debug("open(\"%s\", O_NONBLOCK)", loop_path);
+    }
+
+    if(ioctl(loop_fd, LOOP_CLR_FD))
+    {
+        debug("ioctl(2) failed. (errno: %s)", clean_errno());
+        debug("ioctl(%d, LOOP_CLR_FD)", loop_fd);
+    }
+
+    if(close(loop_fd))
+    {
+        debug("close(2) failed. (errno: %s)", clean_errno());
+        debug("close(%d)", loop_fd);
+    }
+
+    free(loop_path);
+error_0:
+    return ret;
 }
 
 static int protect_exec_clone(void *data)
@@ -198,7 +241,7 @@ static int protect_exec_clone(void *data)
     if((size_t) ret != pid_string_size)
     {
         debug("write(2) failed. (errno: %s)", clean_errno());
-        debug("write(%d, \"%s\", %d)", cgroup_tasks_fd, pid_string, pid_string_size);
+        debug("write(%d, \"%s\", %lu)", cgroup_tasks_fd, pid_string, pid_string_size);
         return -1;
     }
 
@@ -274,7 +317,7 @@ static int protect_exec_clone(void *data)
 
     // NOTE: The following is only reached upon the failure of `execve(2)`
     debug("execve(2) failed. (errno: %s)", clean_errno());
-    debug("execve(\"%s\", %p, %p)", args->uid, args->argv, args->envp);
+    debug("execve(\"%s\", %p, %p)", args->exec_path, args->argv, args->envp);
 
     return -1;
 }

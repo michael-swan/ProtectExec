@@ -26,7 +26,7 @@ clean:
 static: $(BUILD_DEST) $(STATIC_TARGET)
 shared: $(BUILD_DEST) $(SHARED_TARGET)
 
-tests: CFLAGS=-std=c99 -g -O0 -Wall -Wextra -Iinc -DNDEBUG $(OPTFLAGS)
+tests: CFLAGS=-std=c99 -g -O0 -Wall -Wextra -Iinc $(OPTFLAGS)
 tests: $(TESTS)
 
 test/test_%: test/test_%.c $(SOURCES)

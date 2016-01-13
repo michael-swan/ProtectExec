@@ -30,12 +30,20 @@ static char *fd_path(int fd);
 char *losetup(const char *filename)
 {
     const char *dev_dir_path = "/dev/loop";
+
+    int dev_dir_fd = open(dev_dir_path, O_DIRECTORY|O_RDONLY|O_CLOEXEC);
+    DIR *dev_dir = opendir(dev_dir_path);
     
-    return assign_loopback(
+    char *loopback_device_path = assign_loopback(
         filename,
-        open(dev_dir_path, O_DIRECTORY|O_RDONLY|O_CLOEXEC),
-        opendir(dev_dir_path)
+        dev_dir_fd,
+        dev_dir
     );
+
+    close(dev_dir_fd);
+    closedir(dev_dir);
+
+    return loopback_device_path;
 }
 
 // Description:
@@ -175,7 +183,7 @@ static char *fd_path(int fd)
     if(path == NULL)
     {
         debug("malloc(3) failed. (errno: %s)", clean_errno());
-        debug("malloc(%d)", link_path_size + 1);
+        debug("malloc(%ld)", link_path_size + 1);
         return NULL;
     }
 
