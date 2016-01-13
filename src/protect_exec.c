@@ -1,6 +1,8 @@
+#define _GNU_SOURCE
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -10,6 +12,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <mntent.h>
+#include <syscall.h>
 
 #include "config.h"
 #include "losetup.h"
@@ -17,15 +20,16 @@
 
 static int protect_exec_clone(void *data);
 static bool valid_mntent(struct mntent *me);
+static int pivot_root(const char *new_root, const char *put_old);
 
 struct protect_exec_args {
     uid_t uid;
-    char *fs_path;
-    char *mnt_path;
-    char *cgroup_path;
-    char *exec_path;
-    char **argv;
-    char **envp;
+    const char *fs_path;
+    const char *mnt_path;
+    const char *cgroup_path;
+    const char *exec_path;
+    char *const *argv;
+    char *const *envp;
 };
 
 // Assumptions:
@@ -44,6 +48,7 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
        exec_path == NULL || argv == NULL || envp == NULL)
     {
         errno = EINVAL;
+        debug("Input validation failed. (errno: %s)", clean_errno());
         return -1;
     }
 
@@ -52,6 +57,7 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
 
     if(loop_path == NULL)
     {
+        debug("Loopback device assignment failed. (errno: %s)", clean_errno());
         return -1;
     }
 
@@ -59,25 +65,29 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
     // 2a. Mount SquashFS loopback device
     if(mount(loop_path, mnt_path, "squashfs", MS_RDONLY, NULL))
     {
+        debug("mount(2) failed. (errno: %s)", clean_errno());
         return -1;
     }
 
     // 2b. Mount contents of /etc/fstab if it exists
-    FILE *me_file;
-    {
-        char fstab_path[4097];
-        snprintf(fstab_path, sizeof(fstab_path), "%s/etc/fstab", mnt_path);
-        me_file = setmntent(fstab_path, "r");
-    }
+    char fstab_path[4097];
+    snprintf(fstab_path, sizeof(fstab_path), "%s/etc/fstab", mnt_path);
+    FILE *me_file = setmntent(fstab_path, "r");
 
-    if(me_file != NULL)
+    if(me_file == NULL)
+    {
+        debug("setmntent(3) failed. (errno: %s)", clean_errno());
+        debug("setmntent(\"%s\", \"r\")", fstab_path);
+    }
+    else
     {
         struct mntent *me;
-        while(me = getmntent(me_file))
+        while((me = getmntent(me_file)))
         {
             // Filter mount entries
             if(!valid_mntent(me))
             {
+                debug("Invalid mount entry found in root filesystem '/etc/fstab'.");
                 continue;
             }
 
@@ -85,37 +95,76 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
             // TODO: Add support for mount options (after safely processing me->mnt_opts)
 
             // Mount valid fstab entry
-            mount(me->mnt_fsname, me->mnt_dir, me->mnt_type, 0, NULL);
+            if(mount(me->mnt_fsname, me->mnt_dir, me->mnt_type, 0, NULL))
+            {
+                // '/etc/fstab' mount failure is not considered fatal
+                debug("mount(2) failed while processing '/etc/fstab'. (errno: %s)", clean_errno());
+            }
         }
     }
 
-    size_t clone_stack_size = sysconf(_SC_PAGESIZE);
-    void *clone_stack = alloca(clone_stack_size);
+    // 3. Perform `clone(2)`, detaching from certain namespaces
+    // 3a. Allocate several pages for the `clone(2)` stack.
+    size_t clone_stack_size = 4096 * 8;
+    long page_size = sysconf(_SC_PAGESIZE);
 
-    struct protect_exec_args *args = alloca(sizeof(struct protect_exec_args));
-    args->uid = uid;
-    args->fs_path = fs_path;
-    args->mnt_path = mnt_path;
-    args->cgroup_path = cgroup_path;
-    args->exec_path = exec_path;
-    args->argv = argv;
-    args->envp = envp;
+    // When debugging, emit a warning if clone_stack_size is suboptimal.
+    if(page_size == -1)
+    {
+        debug("sysconf(3) failed. (errno: %s)", clean_errno());
+        debug("sysconf(_SC_PAGESIZE)");
+    }
+    else if((size_t) page_size < clone_stack_size && clone_stack_size % (size_t) page_size != 0)
+    {
+        debug("clone_stack_size is not a multiple of the system page size.");
+    }
+    else if((size_t) page_size > clone_stack_size)
+    {
+        debug("clone_stack_size is smaller than a system page.");
+    }
 
-    // 3. Call `clone(2)`, detaching from certain namespaces
+    char clone_stack[clone_stack_size];
+
+    // 3b. Store the arguments to pass to `clone(2)` in a dynamically allocated struct
+    struct protect_exec_args args;
+    args.uid = uid;
+    args.fs_path = fs_path;
+    args.mnt_path = mnt_path;
+    args.cgroup_path = cgroup_path;
+    args.exec_path = exec_path;
+    args.argv = argv;
+    args.envp = envp;
+
+    // 3c. Call `clone(2)` synchronously
     int status;
     pid_t clone_pid = clone(protect_exec_clone, clone_stack + clone_stack_size,
-                            CLONE_NAMESPACES | CLONE_VFORK | SIGCHLD, args);
+                            CLONE_NAMESPACES | CLONE_VFORK | SIGCHLD, &args);
 
-    if(clone_pid == -1 || waitpid(clone_pid, &status, 0) == -1 || status != 0)
+    if(clone_pid == -1)
     {
+        debug("clone(2) failed. (errno: %s)", clean_errno());
+        return -1;
+    }
+
+    debug("clone(2) completed.");
+
+    if(waitpid(clone_pid, &status, 0) == -1)
+    {
+        debug("waitpid(2) failed. (errno: %s)", clean_errno());
+        return -1;
+    }
+
+    debug("waitpid(2) completed.");
+
+    if(status != 0)
+    {
+        debug("clone(2) and waitpid(2) completed with non-success status code. (status: %d)", status);
         return -1;
     }
 
     return 0;
 }
 
-// TODO:
-//   1. Conceive a convention for returning errors from a clone(2) function.
 static int protect_exec_clone(void *data)
 {
     struct protect_exec_args *args = data;
@@ -125,12 +174,16 @@ static int protect_exec_clone(void *data)
     int cgroup_dir_fd = open(args->cgroup_path, O_DIRECTORY|O_RDONLY|O_CLOEXEC);
     if(cgroup_dir_fd == -1)
     {
+        debug("open(2) failed. (errno: %s)", clean_errno());
+        debug("open(\"%s\", O_DIRECTORY|O_RDONLY|O_CLOEXEC)", args->cgroup_path);
         return -1;
     }
 
     int cgroup_tasks_fd = openat(cgroup_dir_fd, "tasks", O_RDWR|O_CLOEXEC);
     if(cgroup_tasks_fd == -1)
     {
+        debug("openat(2) failed. (errno: %s)", clean_errno());
+        debug("openat(%d, \"tasks\", O_RDWR|O_CLOEXEC)", cgroup_dir_fd);
         return -1;
     }
 
@@ -142,8 +195,10 @@ static int protect_exec_clone(void *data)
     size_t pid_string_size = strnlen(pid_string, 10);
     int ret = write(cgroup_tasks_fd, pid_string, pid_string_size);
 
-    if(ret != pid_string_size)
+    if((size_t) ret != pid_string_size)
     {
+        debug("write(2) failed. (errno: %s)", clean_errno());
+        debug("write(%d, \"%s\", %d)", cgroup_tasks_fd, pid_string, pid_string_size);
         return -1;
     }
 
@@ -152,40 +207,54 @@ static int protect_exec_clone(void *data)
     int old_root_fd = open("/", O_DIRECTORY|O_RDONLY|O_CLOEXEC);
     if(old_root_fd == -1)
     {
+        debug("open(2) failed. (errno: %s)", clean_errno());
+        debug("open(\"/\", O_DIRECTORY|O_RDONLY|O_CLOEXEC)");
         return -1;
     }
 
     int new_root_fd = open(args->mnt_path, O_DIRECTORY|O_RDONLY|O_CLOEXEC);
     if(new_root_fd == -1)
     {
+        debug("open(2) failed. (errno: %s)", clean_errno());
+        debug("open(\"%s\", O_DIRECTORY|O_RDONLY|O_CLOEXEC)", args->mnt_path);
         return -1;
     }
 
     // 5b. Perform `pivot_root(2)`
     if(fchdir(new_root_fd))
     {
+        debug("fchdir(2) failed. (errno: %s)", clean_errno());
+        debug("fchdir(%d)", new_root_fd);
         return -1;
     }
 
     if(pivot_root(".", "."))
     {
+        debug("pivot_root(2) failed. (errno: %s)", clean_errno());
+        debug("pivot_root(\".\", \".\")");
         return -1;
     }
 
     // 5c. Unmount the old root
     if(fchdir(old_root_fd))
     {
+        debug("fchdir(2) failed. (errno: %s)", clean_errno());
+        debug("fchdir(%d)", old_root_fd);
         return -1;
     }
 
     if(umount2(".", MNT_DETACH))
     {
+        debug("umount2(2) failed. (errno: %s)", clean_errno());
+        debug("umount2(\".\", MNT_DETACH)");
         return -1;
     }
 
     // 5d. Change current working directory to the new root
     if(fchdir(new_root_fd))
     {
+        debug("fchdir(2) failed. (errno: %s)", clean_errno());
+        debug("fchdir(%d)", new_root_fd);
         return -1;
     }
     
@@ -195,6 +264,8 @@ static int protect_exec_clone(void *data)
     // 7. Perform `setuid(2)` with the specified UID
     if(setuid(args->uid))
     {
+        debug("setuid(2) failed. (errno: %s)", clean_errno());
+        debug("setuid(%d)", args->uid);
         return -1;
     }
 
@@ -202,6 +273,9 @@ static int protect_exec_clone(void *data)
     execve(args->exec_path, args->argv, args->envp);
 
     // NOTE: The following is only reached upon the failure of `execve(2)`
+    debug("execve(2) failed. (errno: %s)", clean_errno());
+    debug("execve(\"%s\", %p, %p)", args->uid, args->argv, args->envp);
+
     return -1;
 }
 
@@ -213,4 +287,9 @@ static bool valid_mntent(struct mntent *me)
     // TODO: Add further validation.
 
     return valid_mnt_type;
+}
+
+static int pivot_root(const char *new_root, const char *put_old)
+{
+    return syscall(__NR_pivot_root, new_root, put_old);
 }
