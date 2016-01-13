@@ -1,1 +1,1 @@
-char *losetup(const char *filename);
+extern char *losetup(const char *filename);

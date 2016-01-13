@@ -3,8 +3,8 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <string.h>
 #include <linux/loop.h>
-#include "losetup.h"
 
 // Checking capabilities should be done as a robustness measures.
 // mknod(2) should be called if all loopback nodes in /dev have been
@@ -25,10 +25,10 @@ static char *fd_path(int fd);
 char *losetup(const char *filename)
 {
     const char *dev_dir_path = "/dev/loop";
-
+    
     return assign_loopback(
         filename,
-        open(dev_dir_path, O_RDONLY|O_CLOEXEC),
+        open(dev_dir_path, O_DIRECTORY|O_RDONLY|O_CLOEXEC),
         opendir(dev_dir_path)
     );
 }
@@ -62,46 +62,44 @@ static char *assign_loopback(const char *filename, int dir_fd, DIR *dir)
     // Loopback device
     struct loop_info info;
     int loop_fd = openat(dir_fd, de->d_name, O_RDONLY|O_CLOEXEC);
-    if(loop_fd != -1 && ioctl(loop_fd, LOOP_GET_STATUS, &info) == -1)
+    if(loop_fd != -1)
     {
-        // Available loopback device
-        int file_fd = open(filename, O_RDONLY|O_CLOEXEC);
-
-        if(file_fd == -1)
+        if(ioctl(loop_fd, LOOP_GET_STATUS, &info) == -1)
         {
-            close(loop_fd);
-            return NULL;
-        }
+            // Available loopback device
+            int file_fd = open(filename, O_RDONLY|O_CLOEXEC);
 
-        int ret_ioctl = ioctl(loop_fd, LOOP_SET_FD, file_fd);
-        int ret_file_close = close(file_fd);
-        int ret_loop_close = close(loop_fd);
-        
-        if(ret_ioctl || ret_file_close || ret_loop_close)
-        {
-            return NULL;
-        }
-        else
-        {
-            char *loop_path = fd_path(loop_fd);
-
-            if(close(loop_fd))
+            if(file_fd == -1)
             {
-                if(loop_path != NULL)
-                {
-                    free(loop_path);
-                }
-
+                close(loop_fd);
                 return NULL;
             }
 
-            return loop_path;
-        }
-    }
+            int ret_ioctl = ioctl(loop_fd, LOOP_SET_FD, file_fd);
+            int ret_file_close = close(file_fd);
+            
+            if(!ret_ioctl && !ret_file_close)
+            {
+                char *loop_path = fd_path(loop_fd);
 
-    if(close(loop_fd))
-    {
-        return NULL;
+                if(close(loop_fd))
+                {
+                    if(loop_path != NULL)
+                    {
+                        free(loop_path);
+                    }
+
+                    return NULL;
+                }
+
+                return loop_path;
+            }
+        }
+
+        if(close(loop_fd))
+        {
+            return NULL;
+        }
     }
     
     return assign_loopback(filename, dir_fd, dir);
@@ -110,7 +108,7 @@ static char *assign_loopback(const char *filename, int dir_fd, DIR *dir)
 static char *fd_path(int fd)
 {
     char link_path[4097];
-    char proc_path[31];
+    char proc_path[33];
     
     // Calculate path to procfs file descriptor link for file descriptor
     snprintf(proc_path, sizeof(proc_path), "/proc/%d/fd/%d", getpid(), fd);
@@ -120,6 +118,11 @@ static char *fd_path(int fd)
     
     // Read procfs file descriptor link path into buffer
     ssize_t link_path_size = readlink(proc_path, link_path, 4096);
+
+    if(link_path_size == -1)
+    {
+        return NULL;
+    }
 
     // Copy file descriptor path to the heap
     char *path = malloc(link_path_size + 1);

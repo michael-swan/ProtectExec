@@ -12,7 +12,7 @@
 #include <mntent.h>
 
 #include "config.h"
-#include "protect_exec.h"
+#include "losetup.h"
 #include "dbg.h"
 
 static int protect_exec_clone(void *data);
@@ -57,24 +57,36 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
 
     // 2. Mount that loopback device at /, tmpfs at /db, and all automatic `/etc/fstab` entries (relative to root path)
     // 2a. Mount SquashFS loopback device
-    mount(loop_path, mnt_path, "squashfs", MS_NOSUID, NULL);
-    // 2b. Mount contents of /etc/fstab
-    FILE *me_file = setmntent("/etc/fstab", "r");
-    struct mntent *me;
-
-    while(me = getmntent(me_file))
+    if(mount(loop_path, mnt_path, "squashfs", MS_RDONLY, NULL))
     {
-        // Filter mount entries
-        if(!valid_mntent(me))
+        return -1;
+    }
+
+    // 2b. Mount contents of /etc/fstab if it exists
+    FILE *me_file;
+    {
+        char fstab_path[4097];
+        snprintf(fstab_path, sizeof(fstab_path), "%s/etc/fstab", mnt_path);
+        me_file = setmntent(fstab_path, "r");
+    }
+
+    if(me_file != NULL)
+    {
+        struct mntent *me;
+        while(me = getmntent(me_file))
         {
-            continue;
+            // Filter mount entries
+            if(!valid_mntent(me))
+            {
+                continue;
+            }
+
+            // TODO: Cleanup me->mnt_dir: remove ".." substrings and concatenate with mnt_path
+            // TODO: Add support for mount options (after safely processing me->mnt_opts)
+
+            // Mount valid fstab entry
+            mount(me->mnt_fsname, me->mnt_dir, me->mnt_type, 0, NULL);
         }
-
-        // TODO: Cleanup me->mnt_dir: remove ".." substrings and concatenate with mnt_path
-        // TODO: Add support for mount options (after safely processing me->mnt_opts)
-
-        // Mount valid fstab entry
-        mount(me->mnt_fsname, me->mnt_dir, me->mnt_type, 0, NULL);
     }
 
     size_t clone_stack_size = sysconf(_SC_PAGESIZE);
@@ -116,7 +128,7 @@ static int protect_exec_clone(void *data)
         return -1;
     }
 
-    int cgroup_tasks_fd = openat(cgroup_dir_fd, "tasks", O_RDONLY|O_CLOEXEC);
+    int cgroup_tasks_fd = openat(cgroup_dir_fd, "tasks", O_RDWR|O_CLOEXEC);
     if(cgroup_tasks_fd == -1)
     {
         return -1;
@@ -128,8 +140,9 @@ static int protect_exec_clone(void *data)
 
     // 4c. Write the current process' pid to the tasks file
     size_t pid_string_size = strnlen(pid_string, 10);
+    int ret = write(cgroup_tasks_fd, pid_string, pid_string_size);
 
-    if(write(cgroup_tasks_fd, pid_string, pid_string_size) != pid_string_size)
+    if(ret != pid_string_size)
     {
         return -1;
     }
@@ -149,6 +162,11 @@ static int protect_exec_clone(void *data)
     }
 
     // 5b. Perform `pivot_root(2)`
+    if(fchdir(new_root_fd))
+    {
+        return -1;
+    }
+
     if(pivot_root(".", "."))
     {
         return -1;
@@ -191,6 +209,8 @@ static bool valid_mntent(struct mntent *me)
 {
     char *ty = me->mnt_type;
     bool valid_mnt_type = !(strcmp(ty, "proc") && strcmp(ty, "tmpfs") && strcmp(ty, "sysfs"));
+
+    // TODO: Add further validation.
 
     return valid_mnt_type;
 }
