@@ -90,6 +90,7 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
 	if(mount(loop_path, mnt_path, "squashfs", MS_RDONLY, NULL))
 	{
 		debug("protect_exec(3) failed. mount(2) failed. (errno: %s)", clean_errno());
+		debug("mount(\"%s\", \"%s\", \"squashfs\", MS_RDONLY, NULL)", loop_path, mnt_path);
 		goto error_1;
 	}
 
@@ -173,6 +174,8 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
 	if(clone_pid == -1)
 	{
 		debug("protect_exec(3) failed. clone(2) call failed. (errno: %s)", clean_errno());
+		debug("clone(%p, %p, CLONE_NAMESPACES | CLONE_VFORK | SIGCHLD, %p)",
+			protect_exec_clone, clone_stack + clone_stack_size, &args);
 		goto error_2;
 	}
 
@@ -181,6 +184,8 @@ int protect_exec(uid_t uid, const char *fs_path, const char *mnt_path,
 	if(waitpid(clone_pid, &status, 0) == -1)
 	{
 		debug("protect_exec(3) failed. waitpid(2) call failed. (errno: %s)", clean_errno());
+		debug("waitpid(%d, %p, 0)", clone_pid, &status);
+		debug("*(%p) = %d", &status, status);
 		goto error_2;
 	}
 	else
