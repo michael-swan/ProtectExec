@@ -247,11 +247,11 @@ static int protect_exec_clone(void *data)
 		return -1;
 	}
 
-	int cgroup_tasks_fd = openat(cgroup_dir_fd, "tasks", O_RDWR|O_CLOEXEC);
+	int cgroup_tasks_fd = openat(cgroup_dir_fd, "tasks", O_WRONLY|O_CLOEXEC);
 	if(cgroup_tasks_fd == -1)
 	{
 		debug("openat(2) failed. (errno: %s)", clean_errno());
-		debug("openat(%d, \"tasks\", O_RDWR|O_CLOEXEC)", cgroup_dir_fd);
+		debug("openat(%d, \"tasks\", O_WRONLY|O_CLOEXEC)", cgroup_dir_fd);
 		return -1;
 	}
 
